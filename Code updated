@@ -1,3 +1,4 @@
+# Load necessary libraries
 library(shiny)
 library(readxl)
 library(tidyverse)
@@ -5,6 +6,7 @@ library(drc)
 library(writexl)
 library(scales)
 
+# Define the User Interface (UI) of the app
 ui <- fluidPage(
   titlePanel("ELISA Analysis Tool"),
   sidebarLayout(
@@ -20,6 +22,7 @@ ui <- fluidPage(
     ),
     mainPanel(
       plotOutput("curvePlot"),
+      plotOutput("debugPlot"),
       tableOutput("resultTable"),
       verbatimTextOutput("errorOut")
     )
@@ -27,9 +30,7 @@ ui <- fluidPage(
 )
 
 server <- function(input, output, session) {
-  
   error_message <- reactiveVal(NULL)
-  
   sample_groups <- reactiveVal(list(list(id = 1, name = "Sample 1", wells = character())))
   sample_counter <- reactiveVal(1)
   
@@ -78,8 +79,8 @@ server <- function(input, output, session) {
     
     tagList(
       selectInput("blank_wells", "Select Blank Wells", choices = wells, multiple = TRUE, selected = c("H1", "H2", "H3")),
-      selectInput("standard_wells", "Select Standard Wells (match order of concentrations)", 
-                  choices = wells, multiple = TRUE, 
+      selectInput("standard_wells", "Select Standard Wells (match order of concentrations)",
+                  choices = wells, multiple = TRUE,
                   selected = c("A1","A2","A3","B1","B2","B3","C1","C2","C3",
                                "D1","D2","D3","E1","E2","E3","F1","F2","F3",
                                "G1","G2","G3")),
@@ -110,7 +111,6 @@ server <- function(input, output, session) {
       }
       
       replicates_per_conc <- length(selected_standards) / length(standard_concs)
-      
       if (!replicates_per_conc %% 1 == 0) {
         stop("Mismatch: Number of standard wells must be evenly divisible by the number of concentrations.")
       }
@@ -130,40 +130,35 @@ server <- function(input, output, session) {
       blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
       df <- df %>% mutate(OD_corrected = OD - blank_val)
       
-# Summarize standards data
-standards_stats <- df %>%
-    filter(Type == "Standard") %>%
-    group_by(Concentration) %>%
-    summarise(
-        Mean_OD = mean(OD_corrected, na.rm = TRUE),
-        SD = sd(OD_corrected, na.rm = TRUE),
-        .groups = "drop"
-    )
-
-# Ensure numeric and valid data
-standards_stats <- standards_stats %>%
-    mutate(
-        Concentration = as.numeric(Concentration),
-        Mean_OD = as.numeric(Mean_OD)
-    ) %>%
-    drop_na()
-
-# Debugging: Print data
-print("Standards Stats:")
-print(standards_stats)
-
-# Fit the 4-parameter logistic regression model
-fit <- tryCatch({
-    drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
-}, error = function(e) {
-    stop("Error fitting model: ", e$message)
-})
-
-# Calculate R² value
-r2_val <- 1 - sum(residuals(fit)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
-
-# Print model summary
-print(summary(fit))
+      standards_stats <- df %>%
+        filter(Type == "Standard") %>%
+        group_by(Concentration) %>%
+        summarise(
+          Mean_OD = mean(OD_corrected, na.rm = TRUE),
+          SD = sd(OD_corrected, na.rm = TRUE),
+          .groups = "drop"
+        )
+      
+      fit_linear <- lm(Mean_OD ~ Concentration, data = standards_stats)
+      r2_linear <- summary(fit_linear)$r.squared
+      
+      fit_logistic <- tryCatch({
+        drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
+      }, error = function(e) NULL)
+      
+      r2_logistic <- if (!is.null(fit_logistic)) {
+        1 - sum(residuals(fit_logistic)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
+      } else {
+        0
+      }
+      
+      if (r2_linear > r2_logistic || is.null(fit_logistic)) {
+        fit <- fit_linear
+        model_type <- "linear"
+      } else {
+        fit <- fit_logistic
+        model_type <- "4PL"
+      }
       
       sample_input <- sample_groups()
       sample_data <- lapply(sample_input, function(group) {
@@ -171,7 +166,6 @@ print(summary(fit))
         wells_input <- input[[paste0("sample_wells_", group$id)]]
         
         if (is.null(wells_input) || length(wells_input) == 0) return(NULL)
-        
         if (!all(wells_input %in% df$Well)) {
           warning("Some selected wells are not present in the dataset.")
           return(NULL)
@@ -180,20 +174,22 @@ print(summary(fit))
         od_vals <- df %>% filter(Well %in% wells_input) %>% pull(OD_corrected)
         mean_od <- mean(od_vals, na.rm = TRUE)
         sd_od <- sd(od_vals, na.rm = TRUE)
-        print("Starting prediction...")
-pred_conc <- tryCatch({
-    ED(fit, mean_od, interval = "delta")$Estimate
-}, error = function(e) {
-    stop("Error during prediction: ", e$message)
-})
-print("Prediction complete.")
         
-        tibble(Sample = name_input, Mean_OD = mean_od, SD = sd_od, Predicted_Conc = pred_conc)
+        pred_conc <- tryCatch({
+          if (model_type == "linear") {
+            predict(fit, newdata = data.frame(Concentration = mean_od))
+          } else {
+            ED(fit, respLev = mean_od, type = "absolute", interval = "delta")[1, "Estimate"]
+          }
+        }, error = function(e) {
+          NA_real_
+        })
+        
+        tibble(Sample = name_input, Mean_OD = mean_od, SD = sd_od, Predicted_Conc = pred_conc, Wells = paste(wells_input, collapse = ","))
       })
       
       samples_df <- bind_rows(sample_data)
-      
-      list(standards = standards_stats, samples = samples_df, fit = fit, r2 = r2_val)
+      list(standards = standards_stats, samples = samples_df, fit = fit, r2 = ifelse(model_type == "linear", r2_linear, r2_logistic), model = model_type)
     }, error = function(e) {
       error_message(paste("Error during analysis:", e$message))
       return(NULL)
@@ -205,18 +201,66 @@ print("Prediction complete.")
     standards <- result()$standards %>%
       mutate(Concentration = as.numeric(Concentration))
     
+    curve_data <- tibble(Concentration = seq(min(standards$Concentration),
+                                             max(standards$Concentration),
+                                             length.out = 100))
+    
+    curve_data <- tryCatch({
+      curve_data %>%
+        mutate(Fitted_OD = predict(result()$fit, newdata = curve_data))
+    }, error = function(e) {
+      curve_data %>% mutate(Fitted_OD = NA_real_)
+    })
+    
     ggplot(standards, aes(x = Concentration, y = Mean_OD)) +
       geom_point(size = 3) +
       geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
-      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      geom_line(data = curve_data, aes(x = Concentration, y = Fitted_OD), color = "blue") +
       geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
       geom_errorbar(data = result()$samples,
                     aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD),
                     color = "red", width = 0.1) +
       geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
-      labs(title = paste("Standard Curve (R² =", round(result()$r2, 3), ")"),
-           x = "Concentration",
-           y = "Corrected OD") +
+      labs(title = paste("Standard Curve (", result()$model, ", R² =", round(result()$r2, 3), ")"),
+           x = "Concentration", y = "Corrected OD") +
+      theme_minimal(base_size = 14)
+  })
+  
+  output$debugPlot <- renderPlot({
+    req(plate_data())
+    df <- plate_data()
+    req(input$blank_wells)
+    blank_val <- mean(df %>% filter(Well %in% input$blank_wells) %>% pull(OD), na.rm = TRUE)
+    
+    df <- df %>%
+      mutate(
+        OD_corrected = OD - blank_val,
+        Well_Type = case_when(
+          Well %in% input$blank_wells ~ "Blank",
+          Well %in% input$standard_wells ~ "Standard",
+          TRUE ~ "Sample"
+        )
+      )
+    
+    sample_input <- sample_groups()
+    labels_df <- bind_rows(lapply(sample_input, function(group) {
+      name_input <- input[[paste0("sample_name_", group$id)]]
+      wells_input <- input[[paste0("sample_wells_", group$id)]]
+      tibble(Well = wells_input, Label = name_input)
+    }))
+    
+    df <- left_join(df, labels_df, by = "Well")
+    
+    ggplot(df, aes(x = reorder(Well, OD_corrected), y = OD_corrected, fill = Well_Type)) +
+      geom_col(show.legend = TRUE) +
+      geom_text(aes(label = Label), vjust = -0.5, size = 3, color = "black") +
+      scale_fill_manual(values = c("Standard" = "steelblue", "Sample" = "tomato", "Blank" = "gray")) +
+      coord_flip() +
+      labs(
+        title = "Corrected OD by Well",
+        x = "Well",
+        y = "Corrected OD"
+      ) +
       theme_minimal(base_size = 14)
   })
   
@@ -237,32 +281,19 @@ print("Prediction complete.")
       library(grid)
       
       pdf(file, width = 8, height = 10)
-
-      print("Starting plot generation...")
-plot_data <- data.frame(Concentration = result()$standards$Concentration, Mean_OD = result()$standards$Mean_OD)
-print(plot_data)
-plot <- ggplot(plot_data, aes(x = Concentration, y = Mean_OD)) +
-    geom_point()
-print("Plot generation complete.")
-
       plot1 <- ggplot(result()$standards, aes(x = Concentration, y = Mean_OD)) +
         geom_point(size = 3) +
         geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
-        geom_smooth(method = "lm", se = FALSE, color = "blue") +
+        geom_line(data = tibble(Concentration = seq(min(result()$standards$Concentration), max(result()$standards$Concentration), length.out = 100)) %>% mutate(Fitted_OD = predict(result()$fit, newdata = .)), aes(x = Concentration, y = Fitted_OD), color = "blue") +
         geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
-        geom_errorbar(data = result()$samples,
-                      aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD),
-                      color = "red", width = 0.1) +
+        geom_errorbar(data = result()$samples, aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD), color = "red", width = 0.1) +
         geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
-        labs(title = paste("Standard Curve (R² =", round(result()$r2, 3), ")"),
-             x = "Concentration", y = "Corrected OD") +
+        labs(title = paste("Standard Curve (", result()$model, ", R² =", round(result()$r2, 3), ")"), x = "Concentration", y = "Corrected OD") +
         theme_minimal(base_size = 14)
       
       print(plot1)
-      
       grid::grid.newpage()
       gridExtra::grid.table(result()$samples)
-      
       dev.off()
     }
   )

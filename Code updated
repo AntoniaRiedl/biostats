@@ -98,74 +98,87 @@ server <- function(input, output, session) {
   
   # Analyze the data and select the best model
   result <- eventReactive(input$analyze, {
-    tryCatch({
-      error_message(NULL)
-      df <- plate_data()
-      conc_text <- gsub("\\s+", "", input$standard_conc)
-      standard_concs <- as.numeric(strsplit(conc_text, ",")[[1]])
-      
-      selected_standards <- input$standard_wells
-      
-      # Validate inputs
-      if (length(standard_concs) == 0 || any(is.na(standard_concs))) {
-        stop("Invalid standard concentrations entered.")
-      }
-      
-      if (length(input$blank_wells) < 1) {
-        stop("Please select at least one blank well.")
-      }
-      
-      replicates_per_conc <- length(selected_standards) / length(standard_concs)
-      if (!replicates_per_conc %% 1 == 0) {
-        stop("Mismatch: Number of standard wells must be evenly divisible by the number of concentrations.")
-      }
-      
-      repeated_concs <- rep(standard_concs, each = replicates_per_conc)
-      
-      df <- df %>%
-        mutate(Type = case_when(
-          Well %in% input$blank_wells ~ "Blank",
-          Well %in% input$standard_wells ~ "Standard",
-          TRUE ~ "Other"
-        ))
-      
-      standard_map <- tibble(Well = selected_standards, Concentration = repeated_concs)
-      df <- df %>% left_join(standard_map, by = "Well")
-      
-      blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
-      df <- df %>% mutate(OD_corrected = OD - blank_val)
-      
-      standards_stats <- df %>%
-        filter(Type == "Standard") %>%
-        group_by(Concentration) %>%
-        summarise(
-          Mean_OD = mean(OD_corrected, na.rm = TRUE),
-          SD = sd(OD_corrected, na.rm = TRUE),
-          .groups = "drop"
-        )
-      
-      # Fit models
-      fit_linear <- lm(Mean_OD ~ Concentration, data = standards_stats)
-      r2_linear <- summary(fit_linear)$r.squared
-      
-      fit_logistic <- tryCatch({
-        drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
-      }, error = function(e) NULL)
-      
-      r2_logistic <- if (!is.null(fit_logistic)) {
-        1 - sum(residuals(fit_logistic)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
-      } else {
-        0
-      }
-      
-      # Select the best model
-      if (r2_linear > r2_logistic || is.null(fit_logistic)) {
-        fit <- fit_linear
-        model_type <- "linear"
-      } else {
-        fit <- fit_logistic
-        model_type <- "4PL"
-      }
+  tryCatch({
+    error_message(NULL)
+    df <- plate_data()
+    conc_text <- gsub("\\s+", "", input$standard_conc)
+    standard_concs <- as.numeric(strsplit(conc_text, ",")[[1]])
+
+    selected_standards <- input$standard_wells
+
+    # Validate inputs
+    if (length(standard_concs) == 0 || any(is.na(standard_concs))) {
+      stop("Invalid standard concentrations entered.")
+    }
+
+    if (length(input$blank_wells) < 1) {
+      stop("Please select at least one blank well.")
+    }
+
+    replicates_per_conc <- length(selected_standards) / length(standard_concs)
+    if (!replicates_per_conc %% 1 == 0) {
+      stop("Mismatch: Number of standard wells must be evenly divisible by the number of concentrations.")
+    }
+
+    repeated_concs <- rep(standard_concs, each = replicates_per_conc)
+
+    df <- df %>%
+      mutate(Type = case_when(
+        Well %in% input$blank_wells ~ "Blank",
+        Well %in% input$standard_wells ~ "Standard",
+        TRUE ~ "Other"
+      ))
+
+    standard_map <- tibble(Well = selected_standards, Concentration = repeated_concs)
+    df <- df %>% left_join(standard_map, by = "Well")
+
+    blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
+    df <- df %>% mutate(OD_corrected = OD - blank_val)
+
+    standards_stats <- df %>%
+      filter(Type == "Standard") %>%
+      group_by(Concentration) %>%
+      summarise(
+        Mean_OD = mean(OD_corrected, na.rm = TRUE),
+        SD = sd(OD_corrected, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    # Fit models
+    fit_linear <- lm(Mean_OD ~ Concentration, data = standards_stats)
+    r2_linear <- summary(fit_linear)$r.squared
+
+    fit_logistic <- tryCatch({
+      drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
+    }, error = function(e) NULL)
+
+    r2_logistic <- if (!is.null(fit_logistic)) {
+      1 - sum(residuals(fit_logistic)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
+    } else {
+      0
+    }
+
+    # Debugging: Print R² values
+    print(paste("Linear model R²:", r2_linear))
+    if (!is.null(fit_logistic)) {
+      print(paste("4PL model R²:", r2_logistic))
+    } else {
+      print("4PL model failed to fit.")
+    }
+
+    # Select the best model
+    if (r2_linear > r2_logistic || is.null(fit_logistic)) {
+      fit <- fit_linear
+      model_type <- "linear"
+    } else {
+      fit <- fit_logistic
+      model_type <- "4PL"
+    }
+
+    # Feedback to the user
+    showNotification(paste("Model selected:", model_type, "with R² =", round(ifelse(model_type == "linear", r2_linear, r2_logistic), 3)))
+
+    # Process sample data (rest of your code remains unchanged)
       
       # Feedback to the user
       showNotification(paste("Model selected:", model_type, "with R² =", round(ifelse(model_type == "linear", r2_linear, r2_logistic), 3)))

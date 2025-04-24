@@ -130,17 +130,20 @@ server <- function(input, output, session) {
       blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
       df <- df %>% mutate(OD_corrected = OD - blank_val)
       
-      standards_stats <- df %>%
-        filter(Type == "Standard") %>%
-        group_by(Concentration) %>%
-        summarise(
-          Mean_OD = mean(OD_corrected, na.rm = TRUE),
-          SD = sd(OD_corrected, na.rm = TRUE),
-          .groups = "drop"
-        )
-      
-      fit <- drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
-      r2_val <- summary(fit)$r.squared
+    standards_stats <- df %>%
+    filter(Type == "Standard") %>%
+    group_by(Concentration) %>%
+    summarise(
+        Mean_OD = mean(OD_corrected, na.rm = TRUE),
+        SD = sd(OD_corrected, na.rm = TRUE),
+        .groups = "drop"
+    )
+
+# Fit the 4PL model
+    fit <- drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
+
+# Calculate R² value (optional)
+    r2_val <- 1 - sum(residuals(fit)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
       
       sample_input <- sample_groups()
       sample_data <- lapply(sample_input, function(group) {

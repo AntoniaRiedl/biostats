@@ -139,7 +139,7 @@ server <- function(input, output, session) {
           .groups = "drop"
         )
       
-      fit <- lm(Mean_OD ~ Concentration, data = standards_stats)
+      fit <- drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
       r2_val <- summary(fit)$r.squared
       
       sample_input <- sample_groups()
@@ -157,7 +157,7 @@ server <- function(input, output, session) {
         od_vals <- df %>% filter(Well %in% wells_input) %>% pull(OD_corrected)
         mean_od <- mean(od_vals, na.rm = TRUE)
         sd_od <- sd(od_vals, na.rm = TRUE)
-        pred_conc <- (mean_od - coef(fit)[1]) / coef(fit)[2]
+        pred_conc <- ED(fit, mean_od, interval = "confidence")$Estimate
         
         tibble(Sample = name_input, Mean_OD = mean_od, SD = sd_od, Predicted_Conc = pred_conc)
       })

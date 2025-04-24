@@ -1,0 +1,235 @@
+library(shiny)
+library(readxl)
+library(tidyverse)
+library(drc)
+library(writexl)
+library(scales)
+
+ui <- fluidPage(
+  titlePanel("ELISA Analysis Tool"),
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file", "Upload 96-well Excel file"),
+      checkboxInput("has_header", "File has column headers", FALSE),
+      uiOutput("well_select_ui"),
+      textInput("standard_conc", "Enter standard concentrations (comma-separated, top to bottom):",
+                "2,1.2,0.7,0.4,0.2,0.1,0.06"),
+      actionButton("add_sample", "Add Sample"),
+      actionButton("analyze", "Analyze"),
+      downloadButton("download", "Download Results")
+    ),
+    mainPanel(
+      plotOutput("curvePlot"),
+      tableOutput("resultTable"),
+      verbatimTextOutput("errorOut")
+    )
+  )
+)
+
+server <- function(input, output, session) {
+  
+  error_message <- reactiveVal(NULL)
+  
+  sample_groups <- reactiveVal(list(list(id = 1, name = "Sample 1", wells = character())))
+  sample_counter <- reactiveVal(1)
+  
+  observeEvent(input$add_sample, {
+    counter <- sample_counter() + 1
+    sample_counter(counter)
+    groups <- sample_groups()
+    groups[[counter]] <- list(id = counter, name = paste0("Sample ", counter), wells = character())
+    sample_groups(groups)
+  })
+  
+  plate_data <- reactive({
+    req(input$file)
+    tryCatch({
+      df_raw <- read_excel(input$file$datapath, col_names = input$has_header)
+      row_ids <- df_raw[[1]]
+      df_raw <- df_raw[, -1]
+      df_clean <- as.data.frame(df_raw)
+      rownames(df_clean) <- row_ids
+      
+      df_clean <- df_clean %>%
+        mutate(across(where(~ all(grepl("^[0-9.]+$", ., perl = TRUE))), as.numeric))
+      
+      df_long <- df_clean %>%
+        rownames_to_column("Row") %>%
+        pivot_longer(-Row, names_to = "Col", values_to = "OD") %>%
+        mutate(Col = as.character(Col), Well = paste0(Row, Col))
+      
+      df_long
+    }, error = function(e) {
+      error_message(paste("Error loading file:", e$message))
+      return(NULL)
+    })
+  })
+  
+  output$well_select_ui <- renderUI({
+    df <- plate_data()
+    req(df)
+    
+    if (!"Well" %in% names(df)) {
+      return(tags$p("Waiting for valid plate data..."))
+    }
+    
+    wells <- unique(df$Well)
+    groups <- sample_groups()
+    
+    tagList(
+      selectInput("blank_wells", "Select Blank Wells", choices = wells, multiple = TRUE, selected = c("H1", "H2", "H3")),
+      selectInput("standard_wells", "Select Standard Wells (match order of concentrations)", 
+                  choices = wells, multiple = TRUE, 
+                  selected = c("A1","A2","A3","B1","B2","B3","C1","C2","C3",
+                               "D1","D2","D3","E1","E2","E3","F1","F2","F3",
+                               "G1","G2","G3")),
+      lapply(seq_along(groups), function(i) {
+        fluidRow(
+          column(6, textInput(paste0("sample_name_", groups[[i]]$id), paste("Name of Sample", i), value = groups[[i]]$name)),
+          column(6, selectInput(paste0("sample_wells_", groups[[i]]$id), paste("Wells for Sample", i), choices = wells, multiple = TRUE))
+        )
+      })
+    )
+  })
+  
+  result <- eventReactive(input$analyze, {
+    tryCatch({
+      error_message(NULL)
+      df <- plate_data()
+      conc_text <- gsub("\\s+", "", input$standard_conc)
+      standard_concs <- as.numeric(strsplit(conc_text, ",")[[1]])
+      
+      selected_standards <- input$standard_wells
+      
+      if (length(standard_concs) == 0 || any(is.na(standard_concs))) {
+        stop("Invalid standard concentrations entered.")
+      }
+      
+      if (length(input$blank_wells) < 1) {
+        stop("Please select at least one blank well.")
+      }
+      
+      replicates_per_conc <- length(selected_standards) / length(standard_concs)
+      
+      if (!replicates_per_conc %% 1 == 0) {
+        stop("Mismatch: Number of standard wells must be evenly divisible by the number of concentrations.")
+      }
+      
+      repeated_concs <- rep(standard_concs, each = replicates_per_conc)
+      
+      df <- df %>%
+        mutate(Type = case_when(
+          Well %in% input$blank_wells ~ "Blank",
+          Well %in% input$standard_wells ~ "Standard",
+          TRUE ~ "Other"
+        ))
+      
+      standard_map <- tibble(Well = selected_standards, Concentration = repeated_concs)
+      df <- df %>% left_join(standard_map, by = "Well")
+      
+      blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
+      df <- df %>% mutate(OD_corrected = OD - blank_val)
+      
+      standards_stats <- df %>%
+        filter(Type == "Standard") %>%
+        group_by(Concentration) %>%
+        summarise(
+          Mean_OD = mean(OD_corrected, na.rm = TRUE),
+          SD = sd(OD_corrected, na.rm = TRUE),
+          .groups = "drop"
+        )
+      
+      fit <- lm(Mean_OD ~ Concentration, data = standards_stats)
+      r2_val <- summary(fit)$r.squared
+      
+      sample_input <- sample_groups()
+      sample_data <- lapply(sample_input, function(group) {
+        name_input <- input[[paste0("sample_name_", group$id)]]
+        wells_input <- input[[paste0("sample_wells_", group$id)]]
+        
+        if (is.null(wells_input) || length(wells_input) == 0) return(NULL)
+        
+        if (!all(wells_input %in% df$Well)) {
+          warning("Some selected wells are not present in the dataset.")
+          return(NULL)
+        }
+        
+        od_vals <- df %>% filter(Well %in% wells_input) %>% pull(OD_corrected)
+        mean_od <- mean(od_vals, na.rm = TRUE)
+        sd_od <- sd(od_vals, na.rm = TRUE)
+        pred_conc <- (mean_od - coef(fit)[1]) / coef(fit)[2]
+        
+        tibble(Sample = name_input, Mean_OD = mean_od, SD = sd_od, Predicted_Conc = pred_conc)
+      })
+      
+      samples_df <- bind_rows(sample_data)
+      
+      list(standards = standards_stats, samples = samples_df, fit = fit, r2 = r2_val)
+    }, error = function(e) {
+      error_message(paste("Error during analysis:", e$message))
+      return(NULL)
+    })
+  })
+  
+  output$curvePlot <- renderPlot({
+    req(result())
+    standards <- result()$standards %>%
+      mutate(Concentration = as.numeric(Concentration))
+    
+    ggplot(standards, aes(x = Concentration, y = Mean_OD)) +
+      geom_point(size = 3) +
+      geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
+      geom_smooth(method = "lm", se = FALSE, color = "blue") +
+      geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
+      geom_errorbar(data = result()$samples,
+                    aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD),
+                    color = "red", width = 0.1) +
+      geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
+      labs(title = paste("Standard Curve (R² =", round(result()$r2, 3), ")"),
+           x = "Concentration",
+           y = "Corrected OD") +
+      theme_minimal(base_size = 14)
+  })
+  
+  output$resultTable <- renderTable({
+    req(result())
+    result()$samples
+  })
+  
+  output$errorOut <- renderText({
+    error_message()
+  })
+  
+  output$download <- downloadHandler(
+    filename = function() { "elisa_results.pdf" },
+    content = function(file) {
+      library(ggplot2)
+      library(gridExtra)
+      library(grid)
+      
+      pdf(file, width = 8, height = 10)
+      
+      plot1 <- ggplot(result()$standards, aes(x = Concentration, y = Mean_OD)) +
+        geom_point(size = 3) +
+        geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
+        geom_smooth(method = "lm", se = FALSE, color = "blue") +
+        geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
+        geom_errorbar(data = result()$samples,
+                      aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD),
+                      color = "red", width = 0.1) +
+        geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
+        labs(title = paste("Standard Curve (R² =", round(result()$r2, 3), ")"),
+             x = "Concentration", y = "Corrected OD") +
+        theme_minimal(base_size = 14)
+      
+      print(plot1)
+      
+      grid::grid.newpage()
+      gridExtra::grid.table(result()$samples)
+      
+      dev.off()
+    }
+  )
+}
+
+shinyApp(ui, server)

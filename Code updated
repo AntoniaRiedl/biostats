@@ -130,7 +130,7 @@ server <- function(input, output, session) {
       blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
       df <- df %>% mutate(OD_corrected = OD - blank_val)
       
-# Summarize standard data
+# Summarize standards data
 standards_stats <- df %>%
     filter(Type == "Standard") %>%
     group_by(Concentration) %>%
@@ -140,23 +140,30 @@ standards_stats <- df %>%
         .groups = "drop"
     )
 
-# Ensure no missing values and numeric data
+# Ensure numeric and valid data
 standards_stats <- standards_stats %>%
-    mutate(Concentration = as.numeric(Concentration), Mean_OD = as.numeric(Mean_OD)) %>%
+    mutate(
+        Concentration = as.numeric(Concentration),
+        Mean_OD = as.numeric(Mean_OD)
+    ) %>%
     drop_na()
 
-# Fit a 4-parameter logistic regression model
+# Debugging: Print data
+print("Standards Stats:")
+print(standards_stats)
+
+# Fit the 4-parameter logistic regression model
 fit <- tryCatch({
     drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
 }, error = function(e) {
     stop("Error fitting model: ", e$message)
 })
 
-# Check R² value
+# Calculate R² value
 r2_val <- 1 - sum(residuals(fit)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
 
-# Print fit summary (optional for debugging)
-summary(fit)
+# Print model summary
+print(summary(fit))
       
       sample_input <- sample_groups()
       sample_data <- lapply(sample_input, function(group) {
@@ -173,7 +180,13 @@ summary(fit)
         od_vals <- df %>% filter(Well %in% wells_input) %>% pull(OD_corrected)
         mean_od <- mean(od_vals, na.rm = TRUE)
         sd_od <- sd(od_vals, na.rm = TRUE)
-        pred_conc <- ED(fit, mean_od, interval = "confidence")$Estimate
+        print("Starting prediction...")
+pred_conc <- tryCatch({
+    ED(fit, mean_od, interval = "delta")$Estimate
+}, error = function(e) {
+    stop("Error during prediction: ", e$message)
+})
+print("Prediction complete.")
         
         tibble(Sample = name_input, Mean_OD = mean_od, SD = sd_od, Predicted_Conc = pred_conc)
       })
@@ -224,7 +237,14 @@ summary(fit)
       library(grid)
       
       pdf(file, width = 8, height = 10)
-      
+
+      print("Starting plot generation...")
+plot_data <- data.frame(Concentration = result()$standards$Concentration, Mean_OD = result()$standards$Mean_OD)
+print(plot_data)
+plot <- ggplot(plot_data, aes(x = Concentration, y = Mean_OD)) +
+    geom_point()
+print("Plot generation complete.")
+
       plot1 <- ggplot(result()$standards, aes(x = Concentration, y = Mean_OD)) +
         geom_point(size = 3) +
         geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +

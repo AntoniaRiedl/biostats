@@ -130,7 +130,8 @@ server <- function(input, output, session) {
       blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
       df <- df %>% mutate(OD_corrected = OD - blank_val)
       
-    standards_stats <- df %>%
+    # Summarize standards data
+standards_stats <- df %>%
     filter(Type == "Standard") %>%
     group_by(Concentration) %>%
     summarise(
@@ -139,11 +140,20 @@ server <- function(input, output, session) {
         .groups = "drop"
     )
 
-# Fit the 4PL model
-    fit <- drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
+# Ensure no missing values and numeric data
+standards_stats <- standards_stats %>%
+    mutate(Concentration = as.numeric(Concentration), Mean_OD = as.numeric(Mean_OD)) %>%
+    drop_na()
 
-# Calculate R² value (optional)
-    r2_val <- 1 - sum(residuals(fit)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
+# Fit 4-parameter logistic regression model
+fit <- tryCatch({
+    drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
+}, error = function(e) {
+    stop("Error fitting model: ", e$message)
+})
+
+# Check R² value
+r2_val <- 1 - sum(residuals(fit)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
       
       sample_input <- sample_groups()
       sample_data <- lapply(sample_input, function(group) {

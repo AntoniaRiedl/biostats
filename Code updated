@@ -205,3 +205,107 @@ server <- function(input, output, session) {
       return(NULL)
     })
   })
+output$curvePlot <- renderPlot({
+    req(result())
+    standards <- result()$standards %>%
+      mutate(Concentration = as.numeric(Concentration))
+
+    curve_data <- tibble(Concentration = seq(min(standards$Concentration),
+                                             max(standards$Concentration),
+                                             length.out = 100))
+
+    curve_data <- tryCatch({
+      curve_data %>%
+        mutate(Fitted_OD = predict(result()$fit, newdata = curve_data))
+    }, error = function(e) {
+      curve_data %>% mutate(Fitted_OD = NA_real_)
+    })
+
+    ggplot(standards, aes(x = Concentration, y = Mean_OD)) +
+      geom_point(size = 3) +
+      geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
+      geom_line(data = curve_data, aes(x = Concentration, y = Fitted_OD), color = "blue") +
+      geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
+      geom_errorbar(data = result()$samples,
+                    aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD),
+                    color = "red", width = 0.1) +
+      geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
+      labs(title = paste("Standard Curve (", result()$model, ", R² =", round(result()$r2, 3), ")"),
+           x = "Concentration", y = "Corrected OD") +
+      theme_minimal(base_size = 14)
+  })
+
+  output$debugPlot <- renderPlot({
+    req(plate_data())
+    df <- plate_data()
+    req(input$blank_wells)
+    blank_val <- mean(df %>% filter(Well %in% input$blank_wells) %>% pull(OD), na.rm = TRUE)
+
+    df <- df %>%
+      mutate(
+        OD_corrected = OD - blank_val,
+        Well_Type = case_when(
+          Well %in% input$blank_wells ~ "Blank",
+          Well %in% input$standard_wells ~ "Standard",
+          TRUE ~ "Sample"
+        )
+      )
+
+    sample_input <- sample_groups()
+    labels_df <- bind_rows(lapply(sample_input, function(group) {
+      name_input <- input[[paste0("sample_name_", group$id)]]
+      wells_input <- input[[paste0("sample_wells_", group$id)]]
+      tibble(Well = wells_input, Label = name_input)
+    }))
+
+    df <- left_join(df, labels_df, by = "Well")
+
+    ggplot(df, aes(x = reorder(Well, OD_corrected), y = OD_corrected, fill = Well_Type)) +
+      geom_col(show.legend = TRUE) +
+      geom_text(aes(label = Label), vjust = -0.5, size = 3, color = "black") +
+      scale_fill_manual(values = c("Standard" = "steelblue", "Sample" = "tomato", "Blank" = "gray")) +
+      coord_flip() +
+      labs(
+        title = "Corrected OD by Well",
+        x = "Well",
+        y = "Corrected OD"
+      ) +
+      theme_minimal(base_size = 14)
+  })
+
+  output$resultTable <- renderTable({
+    req(result())
+    result()$samples
+  })
+
+  output$errorOut <- renderText({
+    error_message()
+  })
+
+  output$download <- downloadHandler(
+    filename = function() { "elisa_results.pdf" },
+    content = function(file) {
+      library(ggplot2)
+      library(gridExtra)
+      library(grid)
+
+      pdf(file, width = 8, height = 10)
+      plot1 <- ggplot(result()$standards, aes(x = Concentration, y = Mean_OD)) +
+        geom_point(size = 3) +
+        geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
+        geom_line(data = tibble(Concentration = seq(min(result()$standards$Concentration), max(result()$standards$Concentration), length.out = 100)) %>% mutate(Fitted_OD = predict(result()$fit, newdata = .)), aes(x = Concentration, y = Fitted_OD), color = "blue") +
+        geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
+        geom_errorbar(data = result()$samples, aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD), color = "red", width = 0.1) +
+        geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
+        labs(title = paste("Standard Curve (", result()$model, ", R² =", round(result()$r2, 3), ")"), x = "Concentration", y = "Corrected OD") +
+        theme_minimal(base_size = 14)
+
+      print(plot1)
+      grid::grid.newpage()
+      gridExtra::grid.table(result()$samples)
+      dev.off()
+    }
+  )
+}
+
+shinyApp(ui, server)

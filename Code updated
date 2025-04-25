@@ -178,11 +178,7 @@ server <- function(input, output, session) {
     # Feedback to the user
     showNotification(paste("Model selected:", model_type, "with R² =", round(ifelse(model_type == "linear", r2_linear, r2_logistic), 3)))
 
-    # Process sample data (rest of your code remains unchanged)
-      
-      # Feedback to the user
-      showNotification(paste("Model selected:", model_type, "with R² =", round(ifelse(model_type == "linear", r2_linear, r2_logistic), 3)))
-      
+    # Process sample data 
       sample_input <- sample_groups()
       sample_data <- lapply(sample_input, function(group) {
         name_input <- input[[paste0("sample_name_", group$id)]]

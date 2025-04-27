@@ -280,7 +280,8 @@ server <- function(input, output, session) {
         x = "Well",
         y = "Corrected OD"
       ) +
-      theme_minimal(base_size = 14)
+      theme_minimal(base_size = 14) +
+      theme(axis.text.y = element_text(angle = 20, hjust = 1, size = 5))
   })
   
   output$download <- downloadHandler(

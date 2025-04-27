@@ -98,87 +98,88 @@ server <- function(input, output, session) {
   
   # Analyze the data and select the best model
   result <- eventReactive(input$analyze, {
-  tryCatch({
-    error_message(NULL)
-    df <- plate_data()
-    conc_text <- gsub("\\s+", "", input$standard_conc)
-    standard_concs <- as.numeric(strsplit(conc_text, ",")[[1]])
-
-    selected_standards <- input$standard_wells
-
-    # Validate inputs
-    if (length(standard_concs) == 0 || any(is.na(standard_concs))) {
-      stop("Invalid standard concentrations entered.")
-    }
-
-    if (length(input$blank_wells) < 1) {
-      stop("Please select at least one blank well.")
-    }
-
-    replicates_per_conc <- length(selected_standards) / length(standard_concs)
-    if (!replicates_per_conc %% 1 == 0) {
-      stop("Mismatch: Number of standard wells must be evenly divisible by the number of concentrations.")
-    }
-
-    repeated_concs <- rep(standard_concs, each = replicates_per_conc)
-
-    df <- df %>%
-      mutate(Type = case_when(
-        Well %in% input$blank_wells ~ "Blank",
-        Well %in% input$standard_wells ~ "Standard",
-        TRUE ~ "Other"
-      ))
-
-    standard_map <- tibble(Well = selected_standards, Concentration = repeated_concs)
-    df <- df %>% left_join(standard_map, by = "Well")
-
-    blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
-    df <- df %>% mutate(OD_corrected = OD - blank_val)
-
-    standards_stats <- df %>%
-      filter(Type == "Standard") %>%
-      group_by(Concentration) %>%
-      summarise(
-        Mean_OD = mean(OD_corrected, na.rm = TRUE),
-        SD = sd(OD_corrected, na.rm = TRUE),
-        .groups = "drop"
-      )
-
-    # Fit models
-    fit_linear <- lm(Mean_OD ~ Concentration, data = standards_stats)
-    r2_linear <- summary(fit_linear)$r.squared
-
-    fit_logistic <- tryCatch({
-      drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
-    }, error = function(e) NULL)
-
-    r2_logistic <- if (!is.null(fit_logistic)) {
-      1 - sum(residuals(fit_logistic)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
-    } else {
-      0
-    }
-
-    # Debugging: Print R² values
-    print(paste("Linear model R²:", r2_linear))
-    if (!is.null(fit_logistic)) {
-      print(paste("4PL model R²:", r2_logistic))
-    } else {
-      print("4PL model failed to fit.")
-    }
-
-    # Select the best model
-    if (r2_linear > r2_logistic || is.null(fit_logistic)) {
-      fit <- fit_linear
-      model_type <- "linear"
-    } else {
-      fit <- fit_logistic
-      model_type <- "4PL"
-    }
-
-    # Feedback to the user
-    showNotification(paste("Model selected:", model_type, "with R² =", round(ifelse(model_type == "linear", r2_linear, r2_logistic), 3)))
-
-    # Process sample data 
+    tryCatch({
+      error_message(NULL)
+      df <- plate_data()
+      conc_text <- gsub("\\s+", "", input$standard_conc)
+      standard_concs <- as.numeric(strsplit(conc_text, ",")[[1]])
+      
+      selected_standards <- input$standard_wells
+      
+      # Validate inputs
+      if (length(standard_concs) == 0 || any(is.na(standard_concs))) {
+        stop("Invalid standard concentrations entered.")
+      }
+      
+      if (length(input$blank_wells) < 1) {
+        stop("Please select at least one blank well.")
+      }
+      
+      replicates_per_conc <- length(selected_standards) / length(standard_concs)
+      if (!replicates_per_conc %% 1 == 0) {
+        stop("Mismatch: Number of standard wells must be evenly divisible by the number of concentrations.")
+      }
+      
+      repeated_concs <- rep(standard_concs, each = replicates_per_conc)
+      
+      df <- df %>%
+        mutate(Type = case_when(
+          Well %in% input$blank_wells ~ "Blank",
+          Well %in% input$standard_wells ~ "Standard",
+          TRUE ~ "Other"
+        ))
+      
+      standard_map <- tibble(Well = selected_standards, Concentration = repeated_concs)
+      df <- df %>% left_join(standard_map, by = "Well")
+      
+      blank_val <- mean(df %>% filter(Type == "Blank") %>% pull(OD), na.rm = TRUE)
+      df <- df %>% mutate(OD_corrected = OD - blank_val)
+      
+      standards_stats <- df %>%
+        filter(Type == "Standard") %>%
+        group_by(Concentration) %>%
+        summarise(
+          Mean_OD = mean(OD_corrected, na.rm = TRUE),
+          SD = sd(OD_corrected, na.rm = TRUE),
+          .groups = "drop"
+        )
+      
+      # Fit models
+      fit_linear <- lm(Mean_OD ~ Concentration, data = standards_stats)
+      r2_linear <- summary(fit_linear)$r.squared
+      
+      fit_logistic <- tryCatch({
+        drm(Mean_OD ~ Concentration, data = standards_stats, fct = LL.4())
+      }, error = function(e) NULL)
+      
+      r2_logistic <- if (!is.null(fit_logistic)) {
+        1 - sum(residuals(fit_logistic)^2) / sum((standards_stats$Mean_OD - mean(standards_stats$Mean_OD))^2)
+      } else {
+        0
+      }
+      
+      # Debugging: Print R² values
+      print(paste("Linear model R²:", r2_linear))
+      if (!is.null(fit_logistic)) {
+        print(paste("4PL model R²:", r2_logistic))
+      } else {
+        print("4PL model failed to fit.")
+      }
+      
+      # Select the best model
+      if (r2_linear > r2_logistic || is.null(fit_logistic)) {
+        fit <- fit_linear
+        model_type <- "linear"
+      } else {
+        fit <- fit_logistic
+        model_type <- "4PL"
+      }
+      
+      # Feedback to the user
+      showNotification(paste("Model selected:", model_type, "with R² =", round(ifelse(model_type == "linear", r2_linear, r2_logistic), 3)))
+      
+      # Process sample data
+      
       sample_input <- sample_groups()
       sample_data <- lapply(sample_input, function(group) {
         name_input <- input[[paste0("sample_name_", group$id)]]
@@ -214,22 +215,22 @@ server <- function(input, output, session) {
       return(NULL)
     })
   })
-output$curvePlot <- renderPlot({
+  output$curvePlot <- renderPlot({
     req(result())
     standards <- result()$standards %>%
       mutate(Concentration = as.numeric(Concentration))
-
+    
     curve_data <- tibble(Concentration = seq(min(standards$Concentration),
                                              max(standards$Concentration),
                                              length.out = 100))
-
+    
     curve_data <- tryCatch({
       curve_data %>%
         mutate(Fitted_OD = predict(result()$fit, newdata = curve_data))
     }, error = function(e) {
       curve_data %>% mutate(Fitted_OD = NA_real_)
     })
-
+    
     ggplot(standards, aes(x = Concentration, y = Mean_OD)) +
       geom_point(size = 3) +
       geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
@@ -243,13 +244,13 @@ output$curvePlot <- renderPlot({
            x = "Concentration", y = "Corrected OD") +
       theme_minimal(base_size = 14)
   })
-
+  
   output$debugPlot <- renderPlot({
     req(plate_data())
     df <- plate_data()
     req(input$blank_wells)
     blank_val <- mean(df %>% filter(Well %in% input$blank_wells) %>% pull(OD), na.rm = TRUE)
-
+    
     df <- df %>%
       mutate(
         OD_corrected = OD - blank_val,
@@ -259,16 +260,16 @@ output$curvePlot <- renderPlot({
           TRUE ~ "Sample"
         )
       )
-
+    
     sample_input <- sample_groups()
     labels_df <- bind_rows(lapply(sample_input, function(group) {
       name_input <- input[[paste0("sample_name_", group$id)]]
       wells_input <- input[[paste0("sample_wells_", group$id)]]
       tibble(Well = wells_input, Label = name_input)
     }))
-
+    
     df <- left_join(df, labels_df, by = "Well")
-
+    
     ggplot(df, aes(x = reorder(Well, OD_corrected), y = OD_corrected, fill = Well_Type)) +
       geom_col(show.legend = TRUE) +
       geom_text(aes(label = Label), vjust = -0.5, size = 3, color = "black") +
@@ -281,40 +282,66 @@ output$curvePlot <- renderPlot({
       ) +
       theme_minimal(base_size = 14)
   })
-
-  output$resultTable <- renderTable({
-    req(result())
-    result()$samples
-  })
-
-  output$errorOut <- renderText({
-    error_message()
-  })
-
+  
   output$download <- downloadHandler(
-    filename = function() { "elisa_results.pdf" },
+    filename = function() { paste0("elisa_results_", Sys.Date(), ".pdf") },
     content = function(file) {
-      library(ggplot2)
-      library(gridExtra)
-      library(grid)
-
-      pdf(file, width = 8, height = 10)
-      plot1 <- ggplot(result()$standards, aes(x = Concentration, y = Mean_OD)) +
+      pdf(file, width = 8.5, height = 11)  # Standard letter size
+      
+      standards <- result()$standards
+      samples <- result()$samples
+      fit <- result()$fit
+      model_type <- result()$model
+      r2 <- result()$r2
+      
+      curve_data <- tibble(Concentration = seq(min(standards$Concentration),
+                                               max(standards$Concentration),
+                                               length.out = 100))
+      curve_data <- tryCatch({
+        curve_data %>%
+          mutate(Fitted_OD = predict(fit, newdata = curve_data))
+      }, error = function(e) {
+        curve_data %>% mutate(Fitted_OD = NA_real_)
+      })
+      
+      p <- ggplot(standards, aes(x = Concentration, y = Mean_OD)) +
         geom_point(size = 3) +
         geom_errorbar(aes(ymin = Mean_OD - SD, ymax = Mean_OD + SD), width = 0.05) +
-        geom_line(data = tibble(Concentration = seq(min(result()$standards$Concentration), max(result()$standards$Concentration), length.out = 100)) %>% mutate(Fitted_OD = predict(result()$fit, newdata = .)), aes(x = Concentration, y = Fitted_OD), color = "blue") +
-        geom_point(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
-        geom_errorbar(data = result()$samples, aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD), color = "red", width = 0.1) +
-        geom_text(data = result()$samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
-        labs(title = paste("Standard Curve (", result()$model, ", R² =", round(result()$r2, 3), ")"), x = "Concentration", y = "Corrected OD") +
+        geom_line(data = curve_data, aes(x = Concentration, y = Fitted_OD), color = "blue", size = 1.2) +
+        geom_point(data = samples, aes(x = Predicted_Conc, y = Mean_OD), color = "red", size = 3) +
+        geom_errorbar(data = samples, aes(x = Predicted_Conc, ymin = Mean_OD - SD, ymax = Mean_OD + SD),
+                      color = "red", width = 0.1) +
+        geom_text(data = samples, aes(x = Predicted_Conc, y = Mean_OD, label = Sample), vjust = -1, color = "red") +
+        labs(title = paste0("Standard Curve (", model_type, ", R² = ", round(r2, 3), ")"),
+             x = "Concentration", y = "Corrected OD") +
         theme_minimal(base_size = 14)
-
-      print(plot1)
-      grid::grid.newpage()
-      gridExtra::grid.table(result()$samples)
+      
+      # Conditionally apply log10 scale for 4PL model
+      if (model_type == "4PL") {
+        p <- p + scale_x_log10()
+      }
+      
+      table_theme <- gridExtra::ttheme_default(
+        core = list(fg_params = list(cex = 1.0)),
+        colhead = list(fg_params = list(fontface = "bold", cex = 1.2))
+      )
+      table_plot <- gridExtra::tableGrob(samples, theme = table_theme)
+      
+      gridExtra::grid.arrange(
+        p,
+        table_plot,
+        ncol = 1,
+        heights = c(2, 1)
+      )
+      
       dev.off()
     }
   )
+  
+  
+  
+  
 }
 
 shinyApp(ui, server)
+
